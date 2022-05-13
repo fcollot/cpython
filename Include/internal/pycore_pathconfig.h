@@ -19,26 +19,21 @@ typedef struct _PyPathConfig {
     wchar_t *program_name;
     /* Set by Py_SetPythonHome() or PYTHONHOME environment variable */
     wchar_t *home;
-#ifdef MS_WINDOWS
     /* isolated and site_import are used to set Py_IsolatedFlag and
        Py_NoSiteFlag flags on Windows in read_pth_file(). These fields
        are ignored when their value are equal to -1 (unset). */
     int isolated;
     int site_import;
+#ifdef MS_WINDOWS
     /* Set when a venv is detected */
     wchar_t *base_executable;
 #endif
 } _PyPathConfig;
 
-#ifdef MS_WINDOWS
 #  define _PyPathConfig_INIT \
       {.module_search_path = NULL, \
        .isolated = -1, \
        .site_import = -1}
-#else
-#  define _PyPathConfig_INIT \
-      {.module_search_path = NULL}
-#endif
 /* Note: _PyPathConfig_INIT sets other fields to 0/NULL */
 
 PyAPI_DATA(_PyPathConfig) _Py_path_config;

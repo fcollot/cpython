@@ -5,6 +5,7 @@
 #include "pycore_initconfig.h"
 #include "pycore_pathconfig.h"
 #include "osdefs.h"               // DELIM
+#include <wchar.h>
 
 #include <sys/types.h>
 #include <string.h>
@@ -165,6 +166,16 @@ _Py_wstat(const wchar_t* path, struct stat *buf)
     return err;
 }
 
+/* determine if "ch" is a separator character */
+static int
+is_sep(wchar_t ch)
+{
+#ifdef ALTSEP
+    return ch == SEP || ch == ALTSEP;
+#else
+    return ch == SEP;
+#endif
+}
 
 static void
 reduce(wchar_t *dir)
@@ -176,6 +187,42 @@ reduce(wchar_t *dir)
     dir[i] = '\0';
 }
 
+static int
+change_ext(wchar_t *dest, const wchar_t *src, const wchar_t *ext)
+{
+    if (src && src != dest) {
+        size_t src_len = wcsnlen(src, MAXPATHLEN+1);
+        size_t i = src_len;
+        if (i >= MAXPATHLEN+1) {
+            Py_FatalError("buffer overflow in getpathp.c's reduce()");
+        }
+
+        while (i > 0 && src[i] != '.' && !is_sep(src[i]))
+            --i;
+
+        if (i == 0) {
+            dest[0] = '\0';
+            return -1;
+        }
+
+        if (is_sep(src[i])) {
+            i = src_len;
+        }
+
+        wcsncpy(dest, src, i);
+        dest[i] = '\0';
+
+    } else {
+        wchar_t *s = wcsrchr(dest, L'.');
+        if (s) {
+            s[0] = '\0';
+        }
+    }
+
+    wcscat(dest, ext);
+
+    return 0;
+}
 
 /* Is file, not directory */
 static int
@@ -188,6 +235,7 @@ isfile(const wchar_t *filename)
     if (!S_ISREG(buf.st_mode)) {
         return 0;
     }
+
     return 1;
 }
 
@@ -1201,6 +1249,147 @@ calculate_argv0_path(PyCalculatePath *calculate,
     return _PyStatus_OK();
 }
 
+static PyStatus
+read_pth_file(_PyPathConfig *pathconfig, wchar_t *prefix, const wchar_t *path,
+              int *found)
+{
+//    char* foo = _Py_EncodeLocaleRaw(filename, NULL);
+//    printf("|%s|\n", foo);
+//    fflush(stdout);
+    PyStatus status;
+    wchar_t *buf = NULL;
+    wchar_t *wline = NULL;
+    FILE *sp_file;
+
+    sp_file = _Py_wfopen(path, L"r");
+    if (sp_file == NULL) {
+        return _PyStatus_OK();
+    }
+
+    wcscpy(prefix, path);
+    reduce(prefix);
+    pathconfig->isolated = 1;
+    pathconfig->site_import = 0;
+
+    size_t bufsiz = MAXPATHLEN;
+    size_t prefixlen = wcslen(prefix);
+
+    buf = (wchar_t*)PyMem_RawMalloc(bufsiz * sizeof(wchar_t));
+    if (buf == NULL) {
+        status = _PyStatus_NO_MEMORY();
+        goto done;
+    }
+    buf[0] = '\0';
+
+    while (!feof(sp_file)) {
+        char line[MAXPATHLEN + 1];
+        char *p = fgets(line, Py_ARRAY_LENGTH(line), sp_file);
+        if (!p) {
+            break;
+        }
+        if (*p == '\0' || *p == '\r' || *p == '\n' || *p == '#') {
+            continue;
+        }
+        while (*++p) {
+            if (*p == '\r' || *p == '\n') {
+                *p = '\0';
+                break;
+            }
+        }
+
+        if (strcmp(line, "import site") == 0) {
+            pathconfig->site_import = 1;
+            continue;
+        }
+        else if (strncmp(line, "import ", 7) == 0) {
+            status = _PyStatus_ERR("only 'import site' is supported "
+                                   "in ._pth file");
+            goto done;
+        }
+
+        int wn = mbstowcs(NULL, line, 0);
+        wchar_t *wline = (wchar_t*)PyMem_RawMalloc((wn + 1) * sizeof(wchar_t));
+        if (wline == NULL) {
+            status = _PyStatus_NO_MEMORY();
+            goto done;
+        }
+        wn = mbstowcs(wline, line, wn + 1);
+        wline[wn] = '\0';
+
+        size_t usedsiz = wcslen(buf);
+        while (usedsiz + wn + prefixlen + 4 > bufsiz) {
+            bufsiz += MAXPATHLEN;
+            wchar_t *tmp = (wchar_t*)PyMem_RawRealloc(buf, (bufsiz + 1) *
+                                                            sizeof(wchar_t));
+            if (tmp == NULL) {
+                status = _PyStatus_NO_MEMORY();
+                goto done;
+            }
+            buf = tmp;
+        }
+
+        if (usedsiz) {
+            wcscat(buf, L":");
+            usedsiz += 1;
+        }
+
+        _Py_BEGIN_SUPPRESS_IPH
+        wcscat(buf, prefix);
+        _Py_END_SUPPRESS_IPH
+
+        wchar_t *b = &buf[usedsiz];
+        joinpath(b, wline, bufsiz - usedsiz);
+
+        PyMem_RawFree(wline);
+        wline = NULL;
+    }
+
+    if (pathconfig->module_search_path == NULL) {
+        pathconfig->module_search_path = _PyMem_RawWcsdup(buf);
+        if (pathconfig->module_search_path == NULL) {
+            status = _PyStatus_NO_MEMORY();
+            goto done;
+        }
+    }
+
+    *found = 1;
+    status = _PyStatus_OK();
+    goto done;
+
+done:
+    PyMem_RawFree(buf);
+    PyMem_RawFree(wline);
+    fclose(sp_file);
+    return status;
+}
+
+
+static int
+get_pth_filename(PyCalculatePath *calculate, wchar_t *filename,
+                 const _PyPathConfig *pathconfig)
+{
+    if (pathconfig->program_full_path[0] &&
+        !change_ext(filename, pathconfig->program_full_path, L"._pth") &&
+        isfile(filename))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static PyStatus
+calculate_pth_file(PyCalculatePath *calculate, _PyPathConfig *pathconfig,
+                   wchar_t *prefix, int *found)
+{
+    wchar_t filename[MAXPATHLEN+1];
+
+    if (!get_pth_filename(calculate, filename, pathconfig)) {
+        return _PyStatus_OK();
+    }
+
+    return read_pth_file(pathconfig, prefix, filename, found);
+}
+
 
 static PyStatus
 calculate_open_pyenv(PyCalculatePath *calculate, FILE **env_file_p)
@@ -1502,6 +1691,31 @@ calculate_path(PyCalculatePath *calculate, _PyPathConfig *pathconfig)
     status = calculate_argv0_path(calculate, pathconfig);
     if (_PyStatus_EXCEPTION(status)) {
         return status;
+    }
+
+    wchar_t prefix[MAXPATHLEN+1];
+    memset(prefix, 0, sizeof(prefix));
+
+    /* Search for a sys.path file */
+    int pth_found = 0;
+    status = calculate_pth_file(calculate, pathconfig, prefix, &pth_found);
+    if (_PyStatus_EXCEPTION(status)) {
+        return status;
+    }
+    if (pth_found) {
+        if (pathconfig->prefix == NULL) {
+            pathconfig->prefix = _PyMem_RawWcsdup(prefix);
+            if (pathconfig->prefix == NULL) {
+                return _PyStatus_NO_MEMORY();
+            }
+        }
+        if (pathconfig->exec_prefix == NULL) {
+            pathconfig->exec_prefix = _PyMem_RawWcsdup(prefix);
+            if (pathconfig->exec_prefix == NULL) {
+                return _PyStatus_NO_MEMORY();
+            }
+        }
+        return _PyStatus_OK();
     }
 
     /* If a pyvenv.cfg configure file is found,

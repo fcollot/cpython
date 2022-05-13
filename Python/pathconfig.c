@@ -85,9 +85,9 @@ pathconfig_copy(_PyPathConfig *config, const _PyPathConfig *config2)
     COPY_ATTR(module_search_path);
     COPY_ATTR(program_name);
     COPY_ATTR(home);
-#ifdef MS_WINDOWS
     config->isolated = config2->isolated;
     config->site_import = config2->site_import;
+#ifdef MS_WINDOWS
     COPY_ATTR(base_executable);
 #endif
 
@@ -220,9 +220,9 @@ _PyPathConfig_AsDict(void)
     SET_ITEM_STR(module_search_path);
     SET_ITEM_STR(program_name);
     SET_ITEM_STR(home);
-#ifdef MS_WINDOWS
     SET_ITEM_INT(isolated);
     SET_ITEM_INT(site_import);
+#ifdef MS_WINDOWS
     SET_ITEM_STR(base_executable);
 
     {
